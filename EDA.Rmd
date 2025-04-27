@@ -1,0 +1,207 @@
+---
+title: "EDA"
+author: "Amber Cash"
+date: "2025-02-10"
+output: 
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,   # Hide messages
+  warning = FALSE   # Hide warnings
+)
+```
+
+# Intro
+
+The problem that Home Credit is facing is that they do not have a reliable way to predict if an applicant will default on their loan. This causes 2 issues; one is that they are losing business from applicants who can repay the loan but get rejected. The second is they approve some applicants that end up defaulting on the loan, causing Home Credit to lose money. 
+
+This notebook will perform an exploratory analysis on the Home Credit data prior to our model building. The point of this notebook is to understand the target variables and the predictors. The target variable is a binary variable - 0 for no default and 1 for default. 
+
+Some questions that might be answered by this notebook are:
+- What is the structure of the data set?
+- What is the distribution of our target variable?
+- What is the accuracy of a majority class classifier or a simple linear regression?
+- What are the relationships between the numeric variables and our taret variables?
+- Do any transactional data points help predict the target variable?
+
+# Set-Up
+
+First, let's load in our packages, read the data and get a quick overview of the structure. 
+
+```{r}
+# Load Required Libraries
+library(data.table)  # Fast data handling
+library(ggplot2)     # Visualization
+library(dplyr)       # Data manipulation
+library(skimr)       # Summary statistics
+library(janitor)     # Data cleaning
+library(caret)       # Machine learning utilities
+library(corrplot)    # Correlation plots
+library(tidyr)
+
+# Read the datasets
+train <- fread("application_train.csv")
+test <- fread("application_test.csv")
+
+# Check structure of the dataset
+skim(train)  # Overview of data
+skim(test)
+```
+Our data set has 122 columns, including our target variable. 16 character columns and 106 numeric columns. 
+
+# Data Clean-Up
+
+```{r}
+# Find missing values
+missing_values <- train %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Feature", values_to = "MissingCount") %>%
+  arrange(desc(MissingCount))
+
+# Print missing data percentage
+missing_values <- missing_values %>%
+  mutate(Percentage = MissingCount / nrow(train) * 100)
+
+print(missing_values[missing_values$Percentage > 0, ])
+
+# Remove columns with too many missing values (>50%)
+train <- train %>%
+  select(-which(colSums(is.na(.)) / nrow(.) > 0.5))
+```
+```{r}
+train <- train %>%
+  mutate(across(where(is.character), ~ ifelse(is.na(.), "Unknown", .)))
+
+# Convert categorical variables to factors
+train <- train %>%
+  mutate(across(where(is.character), as.factor))
+```
+# Target Variable Distribution
+
+Now let's look at the distribution of our target variable, 0 represents no default while 1 represents a default.
+
+```{r}
+# Count Target Values
+train %>%
+  count(TARGET) %>%
+  mutate(Percentage = n / sum(n) * 100)
+
+# Plot Target Distribution
+ggplot(train, aes(x = as.factor(TARGET))) +
+  geom_bar(fill = "blue", alpha = 0.6) +
+  labs(title = "Distribution of Target Variable", x = "Default (1) vs No Default (0)", y = "Count")
+```
+
+We can see that our data is skewed toward no default.
+
+# Testing Default Models
+
+Let's check the accuracy of the model with default models like a majority class classifier and a simple linear regression. 
+
+```{r}
+# Test accuracy with majority class classifier
+majority_class <- train %>%
+  count(TARGET) %>%
+  summarise(max_prop = max(n) / sum(n)) %>%
+  pull(max_prop)
+
+print(paste("Baseline accuracy (majority class classifier):", round(majority_class, 4)))
+
+# Test accuracy with basic regression
+
+# Fit logistic regression model
+logit_model <- lm(TARGET ~ ., data = train)
+
+# Model summary
+summary(logit_model)
+```
+
+Because our data is so heavily skewed to one side, a majority class classifier has a relatively high accuracy at ~92%.Our simple linear regression shows a low R-square around 6% - this is expected as all of the columns are likely causing a lot of noise. Later on in development we will limit the scope to the most important predictors. 
+
+# Correlations
+
+Now let's explore the relationships between our numeric variables. We will focus on the top 10 most correlated with our target variable.
+```{r}
+# Check correlation of new features with TARGET
+cor_matrix <- cor(train %>% select(where(is.numeric)), use = "complete.obs")
+
+# Extract correlations with TARGET and sort them
+cor_target <- cor_matrix["TARGET", ]
+cor_target_sorted <- sort(abs(cor_target), decreasing = TRUE)
+
+# Select top 10 features (excluding TARGET itself)
+top_features <- names(cor_target_sorted)[1:11]  # Skipping TARGET itself
+cor_top <- cor_matrix[top_features, top_features]
+
+# Plot top correlations
+corrplot(cor_top, method = "color", type = "full", tl.cex = 0.8)
+```
+
+We can see that external source 2 and 3 are the most negatively correlated with our target while days_birth is the most positive. 
+
+# Join Transactional Data
+
+In the final section, let's join our data with the bureau dataset and re-evaluate some of our default models. 
+
+```{r}
+# Read the bureau dataset
+bureau <- fread("bureau.csv")
+
+# Aggregate bureau data at SK_ID_CURR level
+bureau_agg <- bureau %>%
+  group_by(SK_ID_CURR) %>%
+  summarise(AVG_DAYS_CREDIT = mean(DAYS_CREDIT, na.rm = TRUE),
+            TOTAL_CREDIT = sum(AMT_CREDIT_SUM, na.rm = TRUE),
+            NUM_LOANS = n())
+
+# Merge with train dataset
+train <- left_join(train, bureau_agg, by = "SK_ID_CURR")
+```
+## Correlations
+```{r}
+# Check correlation of new features with TARGET
+cor_matrix <- cor(train %>% select(where(is.numeric)), use = "complete.obs")
+
+# Extract correlations with TARGET and sort them
+cor_target <- cor_matrix["TARGET", ]
+cor_target_sorted <- sort(abs(cor_target), decreasing = TRUE)
+
+# Select top 10 features (excluding TARGET itself)
+top_features <- names(cor_target_sorted)[2:11]  # Skipping TARGET itself
+cor_top <- cor_matrix[top_features, top_features]
+
+# Plot top correlations
+corrplot(cor_top, method = "color", type = "full", tl.cex = 0.8)
+```
+After joining with the transactional data, we now see that avg_days_credit is now has the highest negative correlation with our target variable. 
+
+## Simple Linear Regression
+```{r}
+# Test accuracy on joined data with basic regression
+
+# Fit logistic regression model
+logit_model_joined <- lm(TARGET ~ ., data = train)
+
+# Model summary
+summary(logit_model_joined)
+```
+We do see a very very slight increase in performance by introducing these new columns. 
+
+# Analyze Difference in Means
+```{r}
+# Analyze differences in means across the two values of target variable
+
+train %>%
+  group_by(TARGET) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+```
+
+# Conclusion
+
+After exploring the data, I can conclude that we will need some sort of classification model to predict the target variable. The dataset is highly skewed towards no default meaning a majority class classifier will have high accuracy but not tell us much. The only issue I saw during this process that there are so many columns in the data set causing noise - but we will be able to refine the model and pull out the most important predictors later on in this project. As we move into deeper analysis, I will want to focus on the high negative correlation (~-0.5) between the our target variable and AVG_DAY_CREDIT from the bureau dataset. 
